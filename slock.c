@@ -36,12 +36,18 @@ struct lock {
 	Window root, win;
 	Pixmap pmap;
 	unsigned long colors[NUMCOLS];
+	GC gc;
 };
 
 struct xrandr {
 	int active;
 	int evbase;
 	int errbase;
+};
+
+struct userhash {
+	char *username;
+	char *hash;
 };
 
 #include "config.h"
@@ -83,10 +89,9 @@ dontkillme(void)
 }
 #endif
 
-static const char *
-gethash(void)
+static void
+gethash(struct userhash *hash)
 {
-	const char *hash;
 	struct passwd *pw;
 
 	/* Check if the current user has a password entry */
@@ -97,36 +102,35 @@ gethash(void)
 		else
 			die("slock: cannot retrieve password entry\n");
 	}
-	hash = pw->pw_passwd;
+	hash->username = pw->pw_name;
+	hash->hash = pw->pw_passwd;
 
 #if HAVE_SHADOW_H
-	if (!strcmp(hash, "x")) {
+	if (!strcmp(hash->hash, "x")) {
 		struct spwd *sp;
 		if (!(sp = getspnam(pw->pw_name)))
 			die("slock: getspnam: cannot retrieve shadow entry. "
 			    "Make sure to suid or sgid slock.\n");
-		hash = sp->sp_pwdp;
+		hash->hash = sp->sp_pwdp;
 	}
 #else
-	if (!strcmp(hash, "*")) {
+	if (!strcmp(hash->hash, "*")) {
 #ifdef __OpenBSD__
 		if (!(pw = getpwuid_shadow(getuid())))
 			die("slock: getpwnam_shadow: cannot retrieve shadow entry. "
 			    "Make sure to suid or sgid slock.\n");
-		hash = pw->pw_passwd;
+		hash->hash = pw->pw_passwd;
 #else
 		die("slock: getpwuid: cannot retrieve shadow entry. "
 		    "Make sure to suid or sgid slock.\n");
 #endif /* __OpenBSD__ */
 	}
 #endif /* HAVE_SHADOW_H */
-
-	return hash;
 }
 
 static void
 readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
-       const char *hash)
+       const struct userhash *hash)
 {
 	XRRScreenChangeNotifyEvent *rre;
 	char buf[32], passwd[256], *inputhash;
@@ -139,6 +143,9 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 	running = 1;
 	failure = 0;
 	oldc = INIT;
+
+	char message[128];
+	snprintf(message, 128, "Enter password for user: %s", hash->username);
 
 	while (running && !XNextEvent(dpy, &ev)) {
 		if (ev.type == KeyPress) {
@@ -160,10 +167,10 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 			case XK_Return:
 				passwd[len] = '\0';
 				errno = 0;
-				if (!(inputhash = crypt(passwd, hash)))
+				if (!(inputhash = crypt(passwd, hash->hash)))
 					fprintf(stderr, "slock: crypt: %s\n", strerror(errno));
 				else
-					running = !!strcmp(inputhash, hash);
+					running = !!strcmp(inputhash, hash->hash);
 				if (running) {
 					XBell(dpy, 100);
 					failure = 1;
@@ -197,6 +204,14 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 					                     locks[screen]->win,
 					                     locks[screen]->colors[color]);
 					XClearWindow(dpy, locks[screen]->win);
+					if (color != INIT) {
+						XSetBackground(dpy, locks[screen]->gc, locks[screen]->colors[color]);
+						XDrawImageString(dpy,
+		                         locks[screen]->win,
+		                         locks[screen]->gc,
+		                         50, 100,
+		                         message, strlen(message));
+					}
 				}
 				oldc = color;
 			}
@@ -259,6 +274,12 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 	                                &color, &color, 0, 0);
 	XDefineCursor(dpy, lock->win, invisible);
 
+	lock->gc = XCreateGC(dpy, lock->win, 0, 0);
+	Font font = XLoadFont(dpy, "-misc-dejavu sans mono-bold-r-normal--0-0-240-240-m-0-*-0");
+	XSetFont(dpy, lock->gc, font);
+	unsigned long foreground = WhitePixel(dpy, lock->screen);
+	XSetForeground(dpy, lock->gc, foreground);
+
 	/* Try to grab mouse pointer *and* keyboard for 600ms, else fail the lock */
 	for (i = 0, ptgrab = kbgrab = -1; i < 6; i++) {
 		if (ptgrab != GrabSuccess) {
@@ -314,7 +335,7 @@ main(int argc, char **argv) {
 	struct group *grp;
 	uid_t duid;
 	gid_t dgid;
-	const char *hash;
+	struct userhash hash;
 	Display *dpy;
 	int s, nlocks, nscreens;
 
@@ -342,9 +363,9 @@ main(int argc, char **argv) {
 	dontkillme();
 #endif
 
-	hash = gethash();
+	gethash(&hash);
 	errno = 0;
-	if (!crypt("", hash))
+	if (!crypt("", hash.hash))
 		die("slock: crypt: %s\n", strerror(errno));
 
 	if (!(dpy = XOpenDisplay(NULL)))
@@ -392,7 +413,7 @@ main(int argc, char **argv) {
 	}
 
 	/* everything is now blank. Wait for the correct password */
-	readpw(dpy, &rr, locks, nscreens, hash);
+	readpw(dpy, &rr, locks, nscreens, &hash);
 
 	return 0;
 }
