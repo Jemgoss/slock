@@ -134,8 +134,8 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 {
 	XRRScreenChangeNotifyEvent *rre;
 	char buf[32], passwd[256], *inputhash;
-	int num, screen, running, failure, oldc;
-	unsigned int len, color;
+	int num, screen, running, failure, color, oldc;
+	unsigned int len, oldlen;
 	KeySym ksym;
 	XEvent ev;
 
@@ -143,9 +143,12 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 	running = 1;
 	failure = 0;
 	oldc = INIT;
+	oldlen = 0;
 
-	char message[128];
-	snprintf(message, 128, "Enter password for user: %s", hash->username);
+	char message[256];
+	snprintf(message, 256, "Enter password for user '%s': ", hash->username);
+	const int msglen = strlen(message);
+	memset(message + msglen, '*', 256 - msglen - 1);
 
 	while (running && !XNextEvent(dpy, &ev)) {
 		if (ev.type == KeyPress) {
@@ -198,22 +201,25 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 				break;
 			}
 			color = len ? INPUT : ((failure || failonclear) ? FAILED : INIT);
-			if (running && oldc != color) {
+			if (running && (oldc != color || len != oldlen)) {
 				for (screen = 0; screen < nscreens; screen++) {
 					XSetWindowBackground(dpy,
 					                     locks[screen]->win,
 					                     locks[screen]->colors[color]);
 					XClearWindow(dpy, locks[screen]->win);
 					if (color != INIT) {
-						XSetBackground(dpy, locks[screen]->gc, locks[screen]->colors[color]);
+						XSetBackground(dpy,
+							 						 locks[screen]->gc,
+													 locks[screen]->colors[color]);
 						XDrawImageString(dpy,
 		                         locks[screen]->win,
 		                         locks[screen]->gc,
 		                         50, 100,
-		                         message, strlen(message));
+		                         message, msglen + len);
 					}
 				}
 				oldc = color;
+				oldlen = len;
 			}
 		} else if (rr->active && ev.type == rr->evbase + RRScreenChangeNotify) {
 			rre = (XRRScreenChangeNotifyEvent*)&ev;
