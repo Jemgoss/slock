@@ -18,6 +18,7 @@
 #include <X11/keysym.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/XKBlib.h>
 
 #include "arg.h"
 #include "util.h"
@@ -128,27 +129,62 @@ gethash(struct userhash *hash)
 #endif /* HAVE_SHADOW_H */
 }
 
+const char *capsLockMsg = "WARNING: caps lock is ON!";
+
+static void
+drawPrompt(Display *dpy, struct lock **locks, int nscreens, char *message, int color, int capsLock) {
+	for (int screen = 0; screen < nscreens; screen++) {
+		XSetWindowBackground(dpy,
+								locks[screen]->win,
+								locks[screen]->colors[color]);
+		XClearWindow(dpy, locks[screen]->win);
+		if (color != INIT) {
+			XSetBackground(dpy, locks[screen]->gc, locks[screen]->colors[color]);
+			XDrawImageString(dpy,
+				locks[screen]->win,
+				locks[screen]->gc,
+				50, 100,
+				message, strlen(message));
+			if (capsLock) {
+				XDrawImageString(dpy,
+					locks[screen]->win,
+					locks[screen]->gc,
+					50, 150,
+					capsLockMsg, strlen(capsLockMsg));
+			}
+		}
+	}
+}
+
 static void
 readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
        const struct userhash *hash)
 {
 	XRRScreenChangeNotifyEvent *rre;
 	char buf[32], passwd[256], *inputhash;
-	int num, screen, running, failure, oldc;
-	unsigned int len, color;
+	int num, running, failure, oldColor, oldCapsLock;
+	unsigned int len, color, capsLock;
 	KeySym ksym;
 	XEvent ev;
 
 	len = 0;
 	running = 1;
 	failure = 0;
-	oldc = INIT;
+	oldColor = INIT;
+	oldCapsLock = 999;
 
 	char message[128];
-	snprintf(message, 128, "Enter password for user: %s", hash->username);
+	snprintf(message, 128, "Enter password for user '%s'", hash->username);
+
+	unsigned kbdState;
+	XkbGetIndicatorState(dpy, XkbUseCoreKbd, &kbdState);
+	capsLock = kbdState & 1;
 
 	while (running && !XNextEvent(dpy, &ev)) {
 		if (ev.type == KeyPress) {
+			XkbGetIndicatorState(dpy, XkbUseCoreKbd, &kbdState);
+			capsLock = kbdState & 1;
+
 			explicit_bzero(&buf, sizeof(buf));
 			num = XLookupString(&ev.xkey, buf, sizeof(buf), &ksym, 0);
 			if (IsKeypadKey(ksym)) {
@@ -161,63 +197,62 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 			    IsKeypadKey(ksym) ||
 			    IsMiscFunctionKey(ksym) ||
 			    IsPFKey(ksym) ||
-			    IsPrivateKeypadKey(ksym))
-				continue;
-			switch (ksym) {
-			case XK_Return:
-				passwd[len] = '\0';
-				errno = 0;
-				if (!(inputhash = crypt(passwd, hash->hash)))
-					fprintf(stderr, "slock: crypt: %s\n", strerror(errno));
-				else
-					running = !!strcmp(inputhash, hash->hash);
-				if (running) {
-					XBell(dpy, 100);
-					failure = 1;
-				}
-				explicit_bzero(&passwd, sizeof(passwd));
-				len = 0;
-				break;
-			case XK_Escape:
-				explicit_bzero(&passwd, sizeof(passwd));
-				len = 0;
-				failure = 0;
-				break;
-			case XK_BackSpace:
-				if (len)
-					passwd[--len] = '\0';
-				if (len == 0)
-					failure = 0;
-				break;
-			default:
-				if (num && !iscntrl((int)buf[0]) &&
-				    (len + num < sizeof(passwd))) {
-					memcpy(passwd + len, buf, num);
-					len += num;
-				}
-				break;
-			}
-			color = len ? INPUT : ((failure || failonclear) ? FAILED : INIT);
-			if (running && oldc != color) {
-				for (screen = 0; screen < nscreens; screen++) {
-					XSetWindowBackground(dpy,
-					                     locks[screen]->win,
-					                     locks[screen]->colors[color]);
-					XClearWindow(dpy, locks[screen]->win);
-					if (color != INIT) {
-						XSetBackground(dpy, locks[screen]->gc, locks[screen]->colors[color]);
-						XDrawImageString(dpy,
-		                         locks[screen]->win,
-		                         locks[screen]->gc,
-		                         50, 100,
-		                         message, strlen(message));
+			    IsPrivateKeypadKey(ksym)) {
+					;
+			} else {
+				switch (ksym) {
+				case XK_Return:
+					passwd[len] = '\0';
+					errno = 0;
+					if (!(inputhash = crypt(passwd, hash->hash)))
+						fprintf(stderr, "slock: crypt: %s\n", strerror(errno));
+					else
+						running = !!strcmp(inputhash, hash->hash);
+					if (running) {
+						XBell(dpy, 100);
+						failure = 1;
 					}
+					explicit_bzero(&passwd, sizeof(passwd));
+					len = 0;
+					break;
+				case XK_Escape:
+					explicit_bzero(&passwd, sizeof(passwd));
+					len = 0;
+					failure = 0;
+					break;
+				case XK_BackSpace:
+					if (len)
+						passwd[--len] = '\0';
+					if (len == 0)
+						failure = 0;
+					break;
+				default:
+					if (num && !iscntrl((int)buf[0]) &&
+						(len + num < sizeof(passwd))) {
+						memcpy(passwd + len, buf, num);
+						len += num;
+					}
+					break;
 				}
-				oldc = color;
+			}
+
+			color = len ? INPUT : ((failure || failonclear) ? FAILED : INIT);
+			if (running && (color != oldColor || capsLock != oldCapsLock)) {
+				drawPrompt(dpy, locks, nscreens, message, color, capsLock);
+				oldColor = color;
+				oldCapsLock = capsLock;
+			}
+		} else if (ev.type == KeyRelease) {
+			XkbGetIndicatorState(dpy, XkbUseCoreKbd, &kbdState);
+			capsLock = kbdState & 1;
+			if (capsLock != oldCapsLock) {
+				color = INPUT;
+				drawPrompt(dpy, locks, nscreens, message, color, capsLock);
+				oldCapsLock = capsLock;
 			}
 		} else if (rr->active && ev.type == rr->evbase + RRScreenChangeNotify) {
 			rre = (XRRScreenChangeNotifyEvent*)&ev;
-			for (screen = 0; screen < nscreens; screen++) {
+			for (int screen = 0; screen < nscreens; screen++) {
 				if (locks[screen]->win == rre->window) {
 					if (rre->rotation == RR_Rotate_90 ||
 					    rre->rotation == RR_Rotate_270)
@@ -231,7 +266,7 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 				}
 			}
 		} else {
-			for (screen = 0; screen < nscreens; screen++)
+			for (int screen = 0; screen < nscreens; screen++)
 				XRaiseWindow(dpy, locks[screen]->win);
 		}
 	}
